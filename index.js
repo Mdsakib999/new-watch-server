@@ -200,6 +200,8 @@ app.delete("/brands/:id", async (req, res) => {
     res.status(500).send({ message: "Server Error", error });
   }
 });
+
+// Add product
 app.post("/product", async (req, res) => {
   const data = req.body;
   try {
@@ -210,6 +212,7 @@ app.post("/product", async (req, res) => {
     res.status(500).send({ message: "Server error" });
   }
 });
+
 app.get("/products", async (req, res) => {
   const {
     page = 1,
