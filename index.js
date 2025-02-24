@@ -2,15 +2,46 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const jwt = require("jsonwebtoken");
+const cloudinary = require("cloudinary").v2;
+
+const stripe = require("stripe")(process.env.SECRET_KEY_STRIPE);
+
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 const uri = process.env.MONGO_URI;
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDE_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON
 app.use(cors());
+
+const deleteImageUrls = async (urls) => {
+  // Ensure `urls` is always an array, even if a single URL is passed
+  const urlArray = Array.isArray(urls) ? urls : [urls];
+
+  // Extract public IDs from the URLs
+  const publicIds = urlArray.map((url) => url.split("/")[7].split(".")[0]);
+
+  try {
+    // Use Cloudinary API to delete resources
+    const result = await cloudinary.api.delete_resources(publicIds, {
+      type: "upload",
+      resource_type: "image",
+    });
+
+    return { result };
+  } catch (error) {
+    console.error("Error deleting images:", error);
+    return { error };
+  }
+};
 
 const verifyJWT = (req, res, next) => {
   const token = req.headers.authorization;
@@ -45,6 +76,7 @@ async function connectDB() {
     userCollection = db.collection("users");
     productCollection = db.collection("products");
     brandsCollection = db.collection("brands");
+    couponCollection = db.collection("coupons");
 
     console.log("✅ Connected to MongoDB");
   } catch (error) {
@@ -206,14 +238,13 @@ app.post("/product", async (req, res) => {
   const data = req.body;
   try {
     const result = await productCollection.insertOne(data);
-    res.status(200).send(result);
+    res.send(result);
   } catch (error) {
     console.error("Error fetching brands:", error);
     res.status(500).send({ message: "Server error" });
   }
 });
-
-app.get("/products", async (req, res) => {
+app.get("/product", async (req, res) => {
   const {
     page = 1,
     limit = 10,
@@ -274,6 +305,106 @@ app.get("/products", async (req, res) => {
     },
   });
 });
+app.get("/product/:id", async (req, res) => {
+  const { id } = req.params;
+  const result = await productCollection.findOne({ _id: new ObjectId(id) });
+  res.send(result);
+});
+app.patch("/product/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const data = req.body;
+  if (data.oldImages) {
+    await deleteImageUrls(data?.oldImages);
+    delete data?.oldImages;
+  }
+  if (data._id) {
+    delete data?._id;
+  }
+  const result = await productCollection.updateOne(
+    { _id: new ObjectId(id) }, // Ensure the ID is converted
+    { $set: { ...data } } // Update the fields
+  );
+  res.send(result);
+});
+app.delete("/product/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const isProductExist = await productCollection.findOne({
+    _id: new ObjectId(id),
+  });
+  if (!isProductExist) {
+    return res.send({ message: "Product is not exist existed" });
+  }
+  await deleteImageUrls(isProductExist.images);
+  const result = await productCollection.deleteOne({ _id: new ObjectId(id) });
+  res.send(result);
+});
+
+//  manage Coupon
+app.post("/coupon", verifyJWT, async (req, res) => {
+  const data = req.body;
+  const expireDate = data.expireDate;
+  const currentDate = new Date();
+  if (new Date(expireDate) < currentDate) {
+    return res.status(403).send({
+      error: true,
+      message: "Expiration date must be greater than the current date.",
+    });
+  }
+  const result = await couponCollection.insertOne(data);
+  res.send(result);
+});
+app.get("/coupon", verifyJWT, async (req, res) => {
+  const result = await couponCollection.find().toArray();
+  res.send(result);
+});
+
+app.delete("/coupon/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const result = await couponCollection.findOneAndDelete({
+    _id: new ObjectId(String(id)),
+  });
+  res.send(result);
+});
+
+app.post("/validCoupon", async (req, res) => {
+  const { couponText } = req.body;
+  const isExistCoupon = await couponCollection.findOne({
+    couponText,
+  });
+  if (!isExistCoupon) {
+    return res.status(404).send({ message: "Coupon Doest Exist" });
+  }
+  if (new Date(isExistCoupon.expireDate) < new Date()) {
+    return res.status(403).send({ message: "Coupon is Expire" });
+  }
+  res.send({ discount: isExistCoupon.discountTk });
+});
+
+app.post("/create-payment-intent", async (req, res) => {
+  try {
+    const { price } = req.body;
+    
+    if (!price || price <= 0) {
+      return res.status(400).json({ error: "Invalid price" });
+    }
+
+    const amount = Math.round(price * 100); // Convert to cents
+
+    // Correct Stripe API call
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount,
+      currency: "usd",
+      payment_method_types: ["card"],
+    });
+
+    res.send({ clientSecret: paymentIntent.client_secret });
+  } catch (error) {
+    console.error("Error creating payment intent:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 
 // Start Server
 app.listen(PORT, () => {
