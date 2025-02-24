@@ -3,6 +3,7 @@ const cors = require("cors");
 require("dotenv").config();
 const jwt = require("jsonwebtoken");
 const cloudinary = require("cloudinary").v2;
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
@@ -73,6 +74,7 @@ async function connectDB() {
     userCollection = db.collection("users");
     productCollection = db.collection("products");
     brandsCollection = db.collection("brands");
+    couponCollection = db.collection("coupons");
 
     console.log("✅ Connected to MongoDB");
   } catch (error) {
@@ -331,6 +333,59 @@ app.delete("/product/:id", verifyJWT, async (req, res) => {
   await deleteImageUrls(isProductExist.images);
   const result = await productCollection.deleteOne({ _id: new ObjectId(id) });
   res.send(result);
+});
+
+//  manage Coupon
+app.post("/coupon", verifyJWT, async (req, res) => {
+  const data = req.body;
+  const expireDate = data.expireDate;
+  const currentDate = new Date();
+  if (new Date(expireDate) < currentDate) {
+    return res.status(403).send({
+      error: true,
+      message: "Expiration date must be greater than the current date.",
+    });
+  }
+  const result = await couponCollection.insertOne(data);
+  res.send(result);
+});
+app.get("/coupon", verifyJWT, async (req, res) => {
+  const result = await couponCollection.find().toArray();
+  res.send(result);
+});
+
+app.delete("/coupon/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const result = await couponCollection.findOneAndDelete({
+    _id: new ObjectId(String(id)),
+  });
+  res.send(result);
+});
+
+app.post("/validCoupon", async (req, res) => {
+  const { couponText } = req.body;
+  const isExistCoupon = await couponCollection.findOne({
+    couponText,
+  });
+  if (!isExistCoupon) {
+    return res.status(404).send({ message: "Coupon Doest Exist" });
+  }
+  if (new Date(isExistCoupon.expireDate) < new Date()) {
+    return res.status(403).send({ message: "Coupon is Expire" });
+  }
+  res.send({ discount: isExistCoupon.discountTk });
+});
+app.post("/create-payment-intent", async (req, res) => {
+  const { price } = req.body;
+  const amount = price * 100;
+  const paymentIntent = await new stripe.paymentIntents.create({
+    amount: amount,
+    currency: "usd",
+    payment_method_types: ["card"],
+  });
+  res.send({
+    clientSecret: paymentIntent.client_secret,
+  });
 });
 
 // Start Server
