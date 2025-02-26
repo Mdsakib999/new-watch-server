@@ -4,8 +4,7 @@ require("dotenv").config();
 const jwt = require("jsonwebtoken");
 const cloudinary = require("cloudinary").v2;
 
-const stripe = require("stripe")(process.env.SECRET_KEY_STRIPE);
-
+// const stripe = require("stripe")(process.env.SECRET_KEY_STRIPE);
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
@@ -77,6 +76,7 @@ async function connectDB() {
     productCollection = db.collection("products");
     brandsCollection = db.collection("brands");
     couponCollection = db.collection("coupons");
+    orderCollection = db.collection("orders");
 
     console.log("✅ Connected to MongoDB");
   } catch (error) {
@@ -108,11 +108,13 @@ app.post("/jwt", async (req, res) => {
 });
 app.get("/me", verifyJWT, async (req, res) => {
   const { email } = req.decoded;
-  const isUserExist = await userCollection.findOne({ email });
-  if (!isUserExist) {
-    return res.send({ message: "User is not exist existed" });
+  if (email) {
+    const isUserExist = await userCollection.findOne({ email });
+    if (!isUserExist) {
+      return res.send({ message: "User is not exist existed" });
+    }
+    res.send(isUserExist);
   }
-  res.send(isUserExist);
 });
 
 // Users API (already exists)
@@ -379,32 +381,226 @@ app.post("/validCoupon", async (req, res) => {
   }
   res.send({ discount: isExistCoupon.discountTk });
 });
-
-app.post("/create-payment-intent", async (req, res) => {
+const findLastOrderId = async (orderCollection) => {
   try {
-    const { price } = req.body;
-    
-    if (!price || price <= 0) {
-      return res.status(400).json({ error: "Invalid price" });
+    // Find the last order sorted by creation date in descending order
+    const lastOrder = await orderCollection.findOne(
+      {},
+      { sort: { createdAt: -1 } } // Sort by `createdAt` in descending order
+    );
+    console.log("Last Order:", lastOrder);
+
+    // Extract and return the numeric part of the last order ID
+    return lastOrder?.orderId ? lastOrder.orderId.split("-").pop() : null;
+  } catch (error) {
+    console.error("Error fetching last order ID:", error);
+    return null; // Return null if an error occurs
+  }
+};
+const generateOrderId = async (orderCollection) => {
+  const prefix = "SMW"; // Prefix for the order ID
+  const timestamp = Date.now().toString(36).slice(3, 7); // Get a 4-character substring from the base-36 encoded timestamp
+
+  try {
+    // Get the last order counter
+    const lastOrderCounter = await findLastOrderId(orderCollection);
+    console.log("Last Order Counter:", lastOrderCounter);
+
+    let nextCounter = 10001; // Default counter value if no previous order exists
+
+    if (lastOrderCounter) {
+      nextCounter = Number(lastOrderCounter) + 1; // Increment the counter
     }
 
-    const amount = Math.round(price * 100); // Convert to cents
-
-    // Correct Stripe API call
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount,
-      currency: "usd",
-      payment_method_types: ["card"],
-    });
-
-    res.send({ clientSecret: paymentIntent.client_secret });
+    // Combine components to form the unique order ID
+    return `${prefix}-${timestamp}-${String(nextCounter).padStart(5, "0")}`;
   } catch (error) {
-    console.error("Error creating payment intent:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error generating order ID:", error);
+    throw new Error("Could not generate order ID");
+  }
+};
+
+app.post("/order", async (req, res) => {
+  const data = req.body;
+  const createdAt = new Date();
+  data.createdAt = createdAt;
+  data.orderStatus = "Pending";
+
+  try {
+    // Update user location if `userId` is provided
+    if (data.userId) {
+      const { location, city, userName } = data.userLocation;
+
+      await userCollection.findOneAndUpdate(
+        { _id: new ObjectId(String(data.userId)) }, // Match the user by `userId`
+        {
+          $set: {
+            location,
+            city,
+            userName,
+            contactNo: data.contactNo,
+          },
+        } // Update fields
+      );
+    }
+
+    // Generate a unique order ID
+    const orderId = await generateOrderId(orderCollection);
+    data.orderId = orderId;
+
+    console.log("Order Data to Insert:", data);
+
+    // Insert the new order into the collection
+    const result = await orderCollection.insertOne(data);
+
+    // Fetch and return the newly created order
+    const findData = await orderCollection.findOne({
+      _id: result.insertedId,
+    });
+    res.send(findData);
+  } catch (error) {
+    console.error("Error creating order:", error);
+    res.status(500).send({ message: "Failed to create order" });
+  }
+});
+app.get("/order", async (req, res) => {
+  const result = await orderCollection.find().toArray();
+  res.send(result);
+});
+app.get("/orders", verifyJWT, async (req, res) => {
+  try {
+    const { search, status } = req.query;
+
+    // Dynamic filter construction
+    const matchStage = {};
+
+    if (search) {
+      matchStage.$or = [
+        { contactNo: { $regex: search, $options: "i" } }, // Search by contact number
+        { orderId: { $regex: search, $options: "i" } }, // Search by order ID
+      ];
+    }
+
+    if (status) {
+      matchStage.orderStatus = { $regex: status, $options: "i" }; // Filter by order status
+    }
+
+    const result = await orderCollection
+      .aggregate([
+        {
+          $match: Object.keys(matchStage).length > 0 ? matchStage : {}, // Apply filters if present
+        },
+        {
+          $lookup: {
+            from: "product",
+            let: { productItems: "$product" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $in: [
+                      "$_id",
+                      {
+                        $map: {
+                          input: "$$productItems",
+                          as: "p",
+                          in: { $toObjectId: "$$p.productId" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+            as: "productData",
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            let: { userId: { $toObjectId: "$userId" } },
+            pipeline: [
+              {
+                $match: {
+                  $expr: { $eq: ["$_id", "$$userId"] },
+                },
+              },
+            ],
+            as: "userData",
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            orderId: 1,
+            contactNo: 1,
+            userLocation: 1,
+            shippingFee: 1,
+            totalAmount: 1,
+            createdAt: 1,
+            orderStatus: 1,
+            discount: 1,
+            userData: { $arrayElemAt: ["$userData", 0] },
+            product: {
+              $map: {
+                input: "$product",
+                as: "p",
+                in: {
+                  productId: {
+                    $arrayElemAt: [
+                      "$productData",
+                      {
+                        $indexOfArray: [
+                          "$productData._id",
+                          { $toObjectId: "$$p.productId" },
+                        ],
+                      },
+                    ],
+                  },
+                  nicotineStrength: "$$p.nicotineStrength",
+                  quantity: "$$p.quantity",
+                },
+              },
+            },
+          },
+        },
+        {
+          $sort: { createdAt: -1 }, // Sort by createdAt in descending order
+        },
+      ])
+      .toArray();
+
+    // Send the filtered and sorted result
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("Error fetching orders:", error.message);
+    res.status(500).json({ error: "Failed to fetch orders" });
   }
 });
 
+// app.post("/create-payment-intent", async (req, res) => {
+//   try {
+//     const { price } = req.body;
 
+//     if (!price || price <= 0) {
+//       return res.status(400).json({ error: "Invalid price" });
+//     }
+
+//     const amount = Math.round(price * 100); // Convert to cents
+
+//     // Correct Stripe API call
+//     const paymentIntent = await stripe.paymentIntents.create({
+//       amount: amount,
+//       currency: "usd",
+//       payment_method_types: ["card"],
+//     });
+
+//     res.send({ clientSecret: paymentIntent.client_secret });
+//   } catch (error) {
+//     console.error("Error creating payment intent:", error);
+//     res.status(500).json({ error: error.message });
+//   }
+// });
 
 // Start Server
 app.listen(PORT, () => {
