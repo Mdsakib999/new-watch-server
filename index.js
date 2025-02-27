@@ -492,7 +492,7 @@ app.get("/orders", verifyJWT, async (req, res) => {
         },
         {
           $lookup: {
-            from: "product",
+            from: "products",
             let: { productItems: "$product" },
             pipeline: [
               {
@@ -557,7 +557,7 @@ app.get("/orders", verifyJWT, async (req, res) => {
                       },
                     ],
                   },
-                  nicotineStrength: "$$p.nicotineStrength",
+                  // nicotineStrength: "$$p.nicotineStrength",
                   quantity: "$$p.quantity",
                 },
               },
@@ -575,6 +575,158 @@ app.get("/orders", verifyJWT, async (req, res) => {
   } catch (error) {
     console.error("Error fetching orders:", error.message);
     res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+app.patch("/order/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const data = req.body;
+  console.log(data);
+  const isOrderExist = await orderCollection.findOne({
+    _id: new ObjectId(String(id)),
+  });
+  if (!isOrderExist) {
+    res.status(404).send({ massage: "This Order doesn't exist" });
+  }
+  const result = await orderCollection.findOneAndUpdate(
+    {
+      _id: new ObjectId(String(id)),
+    },
+    { $set: { ...data } },
+    { returnDocument: "after" }
+  );
+
+  res.send(result);
+});
+app.delete("/order/:id", verifyJWT, async (req, res) => {
+  const { id } = req.params;
+  const result = await orderCollection.findOneAndDelete({
+    _id: new ObjectId(String(id)),
+  });
+  res.send(result);
+});
+app.get("/customerOrder", verifyJWT, async (req, res) => {
+  const { email } = req.decoded;
+  console.log(email);
+  // Check if the user exists
+  if (email) {
+    const isExist = await usersCollection.findOne({ email });
+    console.log(isExist);
+    if (!isExist) {
+      return res.status(404).send({ message: "User doesn't exist" });
+    }
+
+    try {
+      const { search, status } = req.query;
+
+      // Construct the dynamic filter
+      const matchStage = {};
+
+      if (search) {
+        matchStage.$or = [
+          { contactNo: { $regex: search, $options: "i" } }, // Search by contact number
+          { orderId: { $regex: search, $options: "i" } }, // Search by order ID
+        ];
+      }
+
+      if (status) {
+        matchStage.orderStatus = { $regex: status, $options: "i" }; // Filter by order status
+      }
+
+      // Query the order collection
+      const result = await orderCollection
+        .aggregate([
+          {
+            $match: { userId: isExist._id.toString() }, // Match orders belonging to the current user
+          },
+          {
+            $match: Object.keys(matchStage).length > 0 ? matchStage : {}, // Apply filters dynamically
+          },
+          {
+            $lookup: {
+              from: "products", // Join with the product collection
+              let: { productItems: "$product" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $in: [
+                        "$_id",
+                        {
+                          $map: {
+                            input: "$$productItems",
+                            as: "p",
+                            in: { $toObjectId: "$$p.productId" },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+              as: "productData",
+            },
+          },
+          // {
+          //   $lookup: {
+          //     from: "users", // Join with the user collection
+          //     let: { userId: { $toObjectId: "$userId" } },
+          //     pipeline: [
+          //       {
+          //         $match: {
+          //           $expr: { $eq: ["$_id", "$$userId"] },
+          //         },
+          //       },
+          //     ],
+          //     as: "userData",
+          //   },
+          // },
+          {
+            $project: {
+              _id: 1,
+              orderId: 1,
+              contactNo: 1,
+              userLocation: 1,
+              shippingFee: 1,
+              totalAmount: 1,
+              createdAt: 1,
+              orderStatus: 1,
+              discount: 1,
+              userData: { $arrayElemAt: ["$userData", 0] }, // Extract single user object
+              product: {
+                $map: {
+                  input: "$product",
+                  as: "p",
+                  in: {
+                    productId: {
+                      $arrayElemAt: [
+                        "$productData",
+                        {
+                          $indexOfArray: [
+                            "$productData._id",
+                            { $toObjectId: "$$p.productId" },
+                          ],
+                        },
+                      ],
+                    },
+                    nicotineStrength: "$$p.nicotineStrength",
+                    quantity: "$$p.quantity",
+                  },
+                },
+              },
+            },
+          },
+          {
+            $sort: { createdAt: -1 }, // Sort by createdAt in descending order
+          },
+        ])
+        .toArray();
+
+      // Send the filtered result
+      res.status(200).json(result);
+    } catch (error) {
+      console.error("Error fetching orders:", error.message);
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
   }
 });
 
