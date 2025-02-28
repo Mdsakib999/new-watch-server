@@ -609,7 +609,7 @@ app.get("/customerOrder", verifyJWT, async (req, res) => {
   console.log(email);
   // Check if the user exists
   if (email) {
-    const isExist = await usersCollection.findOne({ email });
+    const isExist = await userCollection.findOne({ email });
     console.log(isExist);
     if (!isExist) {
       return res.status(404).send({ message: "User doesn't exist" });
