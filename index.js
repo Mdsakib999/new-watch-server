@@ -19,7 +19,10 @@ cloudinary.config({
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON
-app.use(cors());
+app.use(cors({
+  origin: ["https://watch-client-jet.vercel.app", "http://localhost:5173", "http://localhost:5174"],
+  credentials: true
+}));
 
 const deleteImageUrls = async (urls) => {
   // Ensure `urls` is always an array, even if a single URL is passed
@@ -58,7 +61,10 @@ const verifyJWT = (req, res, next) => {
 
 let db, userCollection, productCollection, brandsCollection; // Store DB collections
 
+let isConnected = false;
+
 async function connectDB() {
+  if (isConnected) return;
   try {
     const client = new MongoClient(uri, {
       serverApi: {
@@ -66,6 +72,7 @@ async function connectDB() {
         strict: true,
         deprecationErrors: true,
       },
+      maxPoolSize: 10,
     });
 
     await client.connect(); // Ensure MongoDB connection
@@ -78,19 +85,27 @@ async function connectDB() {
     couponCollection = db.collection("coupons");
     orderCollection = db.collection("orders");
 
+    isConnected = true;
     console.log("✅ Connected to MongoDB");
   } catch (error) {
     console.error("❌ MongoDB Connection Error:", error);
-    process.exit(1); // Exit if MongoDB connection fails
+    throw error;
   }
 }
 
-// Initialize DB Connection
-connectDB();
-
 // Routes
 app.get("/", (req, res) => {
-  res.send("SM Watch running");
+  res.send("WearTick Ltd running");
+});
+
+// Middleware to ensure DB connection is ready before processing API requests
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    res.status(500).send({ error: true, message: "Database connection failed" });
+  }
 });
 
 // sign jwt
@@ -755,6 +770,10 @@ app.get("/customerOrder", verifyJWT, async (req, res) => {
 // });
 
 // Start Server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
